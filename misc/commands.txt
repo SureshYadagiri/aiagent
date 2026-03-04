@@ -1,0 +1,86 @@
+
+cd ~/environment/
+curl https://start.spring.io/starter.zip \
+  -d type=maven-project \
+  -d language=java \
+  -d packaging=jar \
+  -d javaVersion=25 \
+  -d bootVersion=3.5.9 \
+  -d baseDir=aiagent \
+  -d groupId=com.example \
+  -d artifactId=agent \
+  -d name=agent \
+  -d description='AI Agent with Spring AI and Amazon Bedrock' \
+  -d dependencies=spring-ai-bedrock-converse,web,webflux,actuator \
+  -o aiagent.zip
+
+unzip aiagent.zip
+rm aiagent.zip
+
+==============
+
+logging.level.org.springframework.ai=DEBUG
+# Amazon Bedrock Configuration
+spring.ai.bedrock.converse.chat.options.model=global.anthropic.claude-sonnet-4-20250514-v1:0
+spring.ai.bedrock.converse.chat.options.max-tokens=4096
+
+============
+
+curl -N -X POST localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Write a short story about unicorns"}'; echo
+
+  =======
+  curl -N -X POST localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Hi, my name is Alex. Who are you?"}' ; echo
+
+  ======
+  curl -N -X POST localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "My name is Alex", "username": "user1"}' ; echo
+
+curl -N -X POST localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is my name?", "username": "user1"}' ; echo
+
+
+  =======
+
+  # JDBC Memory Configuration
+spring.ai.chat.memory.repository.jdbc.initialize-schema=always
+
+=======
+
+cd ~/environment/aiagent
+export SPRING_DATASOURCE_URL=$(aws ssm get-parameter --name workshop-db-connection-string --no-cli-pager \
+  | jq --raw-output '.Parameter.Value')
+export SPRING_DATASOURCE_USERNAME=$(aws secretsmanager get-secret-value --secret-id workshop-db-secret --no-cli-pager \
+  | jq --raw-output '.SecretString' | jq -r .username)
+export SPRING_DATASOURCE_PASSWORD=$(aws secretsmanager get-secret-value --secret-id workshop-db-secret --no-cli-pager \
+  | jq --raw-output '.SecretString' | jq -r .password)
+./mvnw spring-boot:run
+
+========
+
+# RAG Configuration
+spring.ai.model.embedding=bedrock-titan
+spring.ai.bedrock.titan.embedding.model=amazon.titan-embed-text-v2:0
+spring.ai.bedrock.titan.embedding.input-type=text
+spring.ai.vectorstore.pgvector.initialize-schema=true
+spring.ai.vectorstore.pgvector.dimensions=1024
+
+=========
+
+cd ~/environment/aiagent
+export SPRING_DATASOURCE_URL=$(aws ssm get-parameter --name workshop-db-connection-string --no-cli-pager \
+  | jq --raw-output '.Parameter.Value')
+export SPRING_DATASOURCE_USERNAME=$(aws secretsmanager get-secret-value --secret-id workshop-db-secret --no-cli-pager \
+  | jq --raw-output '.SecretString' | jq -r .username)
+export SPRING_DATASOURCE_PASSWORD=$(aws secretsmanager get-secret-value --secret-id workshop-db-secret --no-cli-pager \
+  | jq --raw-output '.SecretString' | jq -r .password)
+./mvnw spring-boot:run
+
+
+=======
+
