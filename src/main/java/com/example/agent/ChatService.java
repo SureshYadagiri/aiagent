@@ -13,6 +13,7 @@ import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvi
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.VectorStore;
 import java.util.List;
+import org.springframework.ai.tool.ToolCallbackProvider;
 
 @Service
 public class ChatService {
@@ -26,7 +27,7 @@ public class ChatService {
     private final ChatClient chatClient;
     private final VectorStore vectorStore;
 
-    public ChatService(ChatClient.Builder chatClientBuilder, DataSource dataSource, VectorStore vectorStore) {
+   public ChatService(ChatClient.Builder chatClientBuilder, DataSource dataSource, VectorStore vectorStore, ToolCallbackProvider tools) {
 
         this.vectorStore = vectorStore;
 
@@ -46,6 +47,7 @@ public class ChatService {
                 MessageChatMemoryAdvisor.builder(chatMemory).build(),
                 QuestionAnswerAdvisor.builder(vectorStore).build())
                 .defaultTools(new DateTimeTools(), new WeatherTools())
+                 .defaultToolCallbacks(tools)
             .build();
     }
 
