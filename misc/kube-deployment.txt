@@ -1,0 +1,237 @@
+grep -q 'jib-maven-plugin' ~/environment/aiagent/pom.xml || \
+sed -i '/<\/plugins>/i\
+			<plugin>\
+				<groupId>com.google.cloud.tools</groupId>\
+				<artifactId>jib-maven-plugin</artifactId>\
+				<version>3.5.1</version>\
+				<configuration>\
+					<from>\
+						<image>public.ecr.aws/docker/library/amazoncorretto:25-alpine</image>\
+					</from>\
+					<container>\
+						<user>1000</user>\
+					</container>\
+				</configuration>\
+			</plugin>' ~/environment/aiagent/pom.xml
+
+
+
+
+            kubectl create namespace aiagent
+
+            kubectl create serviceaccount aiagent -n aiagent
+
+            aws eks create-pod-identity-association \
+  --cluster-name workshop-eks \
+  --namespace aiagent \
+  --service-account aiagent \
+  --role-arn arn:aws:iam::${ACCOUNT_ID}:role/aiagent-eks-pod-role \
+  --no-cli-pager
+
+
+ASSOCIATION_ID=$(aws eks list-pod-identity-associations --cluster-name workshop-eks --no-cli-pager \
+  | jq -r '.associations[] | select(.namespace=="aiagent") | .associationId')
+aws eks describe-pod-identity-association \
+  --cluster-name workshop-eks \
+  --association-id ${ASSOCIATION_ID} \
+  --no-cli-pager
+
+
+
+  mkdir -p ~/environment/aiagent/k8s
+
+
+
+
+------
+
+
+cat <<EOF > ~/environment/aiagent/k8s/secret-provider-class.yaml
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: aiagent-secrets
+  namespace: aiagent
+spec:
+  provider: aws
+  parameters:
+    usePodIdentity: "true"
+    objects: |
+      - objectName: "workshop-db-secret"
+        objectType: "secretsmanager"
+        jmesPath:
+          - path: "password"
+            objectAlias: "spring.datasource.password"
+          - path: "username"
+            objectAlias: "spring.datasource.username"
+      - objectName: "workshop-db-connection-string"
+        objectType: "ssmparameter"
+        objectAlias: "spring.datasource.url"
+EOF
+kubectl apply -f ~/environment/aiagent/k8s/secret-provider-class.yaml
+
+------
+
+
+
+
+
+
+  MCP_URL=http://$(kubectl get ingress mcpserver -n mcpserver \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+echo "MCP URL: ${MCP_URL}"
+
+USER_POOL_ID=$(aws cognito-idp list-user-pools --max-results 60 --no-cli-pager \
+  --query "UserPools[?Name=='aiagent-user-pool'].Id | [0]" --output text)
+COGNITO_ISSUER_URI="https://cognito-idp.${AWS_REGION}.amazonaws.com/${USER_POOL_ID}"
+echo "Cognito Issuer URI: ${COGNITO_ISSUER_URI}"
+
+ECR_URI=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/aiagent
+cat <<EOF > ~/environment/aiagent/k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiagent
+  namespace: aiagent
+  labels:
+    app: aiagent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiagent
+  template:
+    metadata:
+      labels:
+        app: aiagent
+    spec:
+      serviceAccountName: aiagent
+      nodeSelector:
+        karpenter.sh/nodepool: workshop
+      containers:
+        - name: aiagent
+          image: ${ECR_URI}:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_CONFIG_IMPORT
+              value: "optional:configtree:/mnt/secrets-store/"
+            - name: SPRING_AI_MCP_CLIENT_STREAMABLEHTTP_CONNECTIONS_SERVER1_URL
+              value: "${MCP_URL}"
+            - name: SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
+              value: "${COGNITO_ISSUER_URI}"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            failureThreshold: 6
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            failureThreshold: 6
+            periodSeconds: 5
+            initialDelaySeconds: 10
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            failureThreshold: 10
+            periodSeconds: 5
+            initialDelaySeconds: 20
+          volumeMounts:
+            - name: secrets-store
+              mountPath: "/mnt/secrets-store"
+              readOnly: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: aiagent-secrets
+EOF
+kubectl apply -f ~/environment/aiagent/k8s/deployment.yaml
+
+
+------
+
+cat <<EOF > ~/environment/aiagent/k8s/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aiagent
+  namespace: aiagent
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health
+  labels:
+    app: aiagent
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: aiagent
+                port:
+                  number: 80
+EOF
+kubectl apply -f ~/environment/aiagent/k8s/ingress.yaml
+
+
+
+------
+
+kubectl wait deployment aiagent -n aiagent \
+  --for condition=Available=True --timeout=120s
+
+SVC_URL=http://$(kubectl get ingress aiagent -n aiagent \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+while ! curl -s --max-time 5 "${SVC_URL}/actuator/health" | grep -q '"status":"UP"'; do
+  echo "Waiting for load balancer..." && sleep 15
+done
+
+echo "Service URL: ${SVC_URL}"
+
+---------
+
+Service URL: http://k8s-aiagent-aiagent-d123d20aba-1616466962.us-east-1.elb.amazonaws.com
+
+
+echo ${IDE_PASSWORD}
+x5FcK4co9KULfV1LiK1SnoYFvs060bim
+
+-------
+kubectl logs -n aiagent \
+  $(kubectl get pods -n aiagent -o jsonpath='{.items[0].metadata.name}')
+
+
+
+  -----
+
+  kubectl rollout restart deployment aiagent -n aiagent
+kubectl rollout status deployment aiagent -n aiagent
+
